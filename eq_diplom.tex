@@ -1,0 +1,181 @@
+\documentclass[a4paper,14pt, ukrainian]{extarticle}
+\usepackage[T1,T2A]{fontenc}
+\usepackage[utf8]{inputenc} %useful to type directly diacritic characters
+\usepackage[ukrainian]{babel}
+\usepackage{graphicx} %Loading the package
+\graphicspath{{images/}}
+\usepackage[export]{adjustbox}
+\usepackage{setspace}
+\usepackage{mathtools}
+\usepackage{float}
+\usepackage{extsizes}
+
+% \usepackage[utf8]{inputenc}
+% \usepackage{mathptmx}
+
+
+
+
+\usepackage[usenames]{color} %used for font color
+\usepackage{amssymb} %maths
+\usepackage{amsmath} %maths
+\usepackage[dvipsnames]{xcolor}
+\usepackage{bbm}
+\numberwithin{equation}{section}
+\usepackage{booktabs}
+\usepackage[normalem]{ulem}
+% \usepackage[nottoc,numbib]{tocbibind}
+\usepackage{subcaption}
+\usepackage{graphicx}
+\usepackage{indentfirst} % отделять первую строку раздела абзацным отступом тоже
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{tocloft}
+\usepackage{fancyhdr}
+\usepackage{tempora}
+\usepackage{titlesec}
+
+\usepackage{geometry}
+\usepackage{enumitem}
+
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[R]{\thepage}
+\fancyheadoffset{0mm}
+\fancyfootoffset{0mm}
+\setlength{\headheight}{17pt}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+\addto\captionsukrainian{\def\refname{ПЕРЕЛІК ДЖЕРЕЛ ПОСИЛАНЬ}}
+\addto\captionsukrainian{\renewcommand{\figurename}{Рисунок}}
+\fancypagestyle{plain}{ 
+    \fancyhf{}
+    \rhead{\thepage}}
+
+\newcommand{\sectionbreak}{\clearpage} % Кожна сеекція із нової сторінки
+
+\titleformat{\chapter}[display]
+    {\filcenter}
+    {\MakeUppercase{\chaptertitlename} \thechapter}
+    {8pt}
+    {\bfseries}{}
+ 
+\titleformat{\section}
+    {\centering\normalsize\bfseries}
+    {\thesection}
+    {1em}{}
+ 
+\titleformat{\subsection}
+    {\normalsize\bfseries}
+    {\thesubsection}
+    {1em}{}
+ 
+\geometry{left=3cm}
+\geometry{right=1.5cm}
+\geometry{top=2cm}
+\geometry{bottom=2cm}
+% Настройка вертикальных и горизонтальных отступов
+\titlespacing*{\chapter}{0pt}{-30pt}{8pt}
+\titlespacing*{\section}{\parindent}{*4}{*4}
+\titlespacing*{\subsection}{\parindent}{*4}{*4}
+
+\makeatletter
+    \AddEnumerateCounter{\asbuk}{\@asbuk}{м)}
+\makeatother
+\setlist{nolistsep}
+\renewcommand{\labelitemi}{-}
+% \renewcommand{\labelenumi}{\asbuk{enumi})}
+\renewcommand{\labelenumii}{\arabic{enumii})}
+
+\tocloftpagestyle{empty}
+\addto\captionsukrainian{%
+  \renewcommand{\contentsname}{ЗМІСТ}%
+}
+\renewcommand{\cfttoctitlefont}{\hspace{0.5\textwidth}\bfseries}
+\renewcommand{\cftbeforetoctitleskip}{1em}
+% \renewcommand{\cftaftertoctitle}{\mbox{}\hfill \\ \mbox{}\hfill{\footnotesize Стр.}\vspace{-2.5em}}
+\renewcommand{\cftsecfont}{\bfseries\hspace{31pt}}
+\renewcommand{\cftsubsecfont}{\hspace{14pt}}
+\renewcommand{\cftparskip}{-1mm}
+\renewcommand{\cftdotsep}{1}
+\setcounter{tocdepth}{2} % задать глубину оглавления — до subsection включительно
+
+
+\makeatletter
+    \renewcommand{\@dotsep}{2}
+    \newcommand{\l@likechapter}[2]{{\bfseries\@dottedtocline{0}{0pt}{0pt}{#1}{#2}}}
+\makeatother
+
+% \newcommand{\likechapter}[1]{    
+%     \likechapterheading{#1}    
+%     \addcontentsline{toc}{likechapter}{\MakeUppercase{#1}}}
+
+\useunder{\uline}{\ul}{}
+\DeclareRobustCommand{\[}{\begin{equation}}
+\DeclareRobustCommand{\]}{\end{equation}}
+\counterwithin{figure}{section}
+\counterwithin{table}{section}
+
+\renewcommand{\cftsubsecaftersnum}{} % що буде писатися після номеру пункта (нічого)
+\renewcommand{\cftsubsecindent}{3em} % відступ номера пункта від лівого краю
+\renewcommand{\cftsubsecnumwidth}{2.5em} % розмір поля, що виділяється під номер пункта
+\renewcommand{\cftsubsecpagefont}{\mdseries} % стиль номеру сторінки (звичайний, 14pt)
+\renewcommand{\cftsubsecfont}{\mdseries} % стиль заголовку (звичайний)
+\renewcommand{\cftsubsecleader}{\cftdotfill{\cftsubsecdotsep}} % чим заповнювати проміжок від заголовку до номеру сторінки (точками)
+
+\title{Оцінка якості моделей глибокого начання у системах рекомендацій}
+\author{Володимир Малиняк}
+
+\begin{document}
+
+\input{sections/sk.tex}
+\thispagestyle{empty}
+\onehalfspacing
+% \maketitlepage
+\newpage
+\tableofcontents
+\input{sections/vstup.tex}
+\input{sections/zagalni_poloz.tex}
+\input{sections/dl_rec.tex}
+\input{sections/metrics.tex}
+\input{sections/alg.tex}
+\input{sections/factors.tex}
+\input{sections/datasets.tex}
+\input{sections/experiments.tex}
+\input{sections/end.tex}
+
+\newpage
+\begin{thebibliography}{99}
+    \bibitem{NEUMF}
+    Xiangnan He, Lizi Liao, Hanwang Zhang, Liqiang Nie, Xia Hu, and Tat-Seng Chua. 2017.  \emph{Neural Collaborative Filtering}. In Proceedings of the 26th International Conference on World Wide Web (WWW '17). International World Wide Web Conferences Steering Committee, Republic and Canton of Geneva, CHE, 173–182. https://doi.org/10.1145/3038912.3052569
+    \bibitem{VAE}
+    Dawen Liang, Rahul G. Krishnan, Matthew D. Hoffman, and Tony Jebara. 2018. \emph{Variational Autoencoders for Collaborative Filtering}. In Proceedings of the 2018 World Wide Web Conference (WWW '18). International World Wide Web Conferences Steering Committee, Republic and Canton of Geneva, CHE, 689–698. https://doi.org/10.1145/3178876.3186150
+    \bibitem{NGCF}
+    Xiang Wang, Xiangnan He, Meng Wang, Fuli Feng, and Tat-Seng Chua. 2019. \emph{Neural Graph Collaborative Filtering}. In Proceedings of the 42nd International ACM SIGIR Conference on Research and Development in Information Retrieval (SIGIR'19). Association for Computing Machinery, New York, NY, USA, 165–174. https://doi.org/10.1145/3331184.3331267
+    \bibitem{GraphBook}
+    William L. Hamilton. (2020). \emph{Graph Representation Learning}. Synthesis Lectures on Artificial Intelligence and Machine Learning, Vol. 14, No. 3 , Pages 1-159.
+    \bibitem{MetaRec}
+    Le, James, "MetaRec: Meta-Learning Meets Recommendation Systems" (2020). Thesis. Rochester Institute of Technology.
+    \bibitem{Metrics}
+    Saúl Vargas. 2014. \emph{Novelty and diversity enhancement and evaluation in recommender systems and information retrieval}. In Proceedings of the 37th international ACM SIGIR conference on Research  development in information retrieval (SIGIR '14). Association for Computing Machinery, New York, NY, USA, 1281. https://doi.org/10.1145/2600428.2610382
+    \bibitem{MetricPtoblems}
+    Zhu Sun, Di Yu, Hui Fang, Jie Yang, Xinghua Qu, Jie Zhang, and Cong Geng. 2020. \emph{Are We Evaluating Rigorously? Benchmarking Recommendation for Reproducible Evaluation and Fair Comparison}. In Proceedings of the 14th ACM Conference on Recommender Systems (RecSys '20). Association for Computing Machinery, New York, NY, USA, 23–32. https://doi.org/10.1145/3383313.3412489
+    \bibitem{RecoBook}
+    Francesco Ricci, Lior Rokach, Bracha Shapira, and Paul B. Kantor. 2010. \emph{Recommender Systems Handbook (1st. ed.)}. Springer-Verlag, Berlin, Heidelberg.
+    \bibitem{Bishop}
+    Christopher M. Bishop. \emph{Pattern Recognition and Machine Learning}. 2006. ISBN-10: 0-387-31073-8. Springer New York, NY
+    \bibitem{Colab}
+    Google Colab [Електронний ресурс]. – Режим доступу:\href{https://colab.research.google.com/}{https://colab.research.google.com/}
+    \bibitem{NetflixDataset}
+    Netflix Prize Dataset [Електронний ресурс]. – Режим доступу:\href{https://archive.org/download/nfprize_dataset.tar}{https://archive.org/download/nfprize\_dataset.tar}
+    \bibitem{MovilensDataset}
+    Movilens Dataset [Електронний ресурс]. – Режим доступу:\href{https://grouplens.org/datasets/movielens/1m/}{https://grouplens.org/datasets/movielens/1m/}
+    \bibitem{LastFMDataset}
+    LastFM Dataset [Електронний ресурс]. – Режим доступу:\href{https://grouplens.org/datasets/hetrec-2011/}{https://grouplens.org/datasets/hetrec-2011/}
+    \bibitem{Perceptron}
+    Персептрон [Електронний ресурс]. – Режим доступу:\href{https://ru.wikipedia.org/wiki/%D0%9F%D0%B5%D1%80%D1%86%D0%B5%D0%BF%D1%82%D1%80%D0%BE%D0%BD}{https://ru.wikipedia.org/wiki/Перцептрон}
+    \end{thebibliography}
+\input{sections/dodatok1.tex}
+\end{document}

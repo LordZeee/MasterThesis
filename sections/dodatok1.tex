@@ -1,0 +1,1207 @@
+% \newpage
+% \section{ДОДАТКИ}
+% Код проведення експериментів.
+% \centering
+% \begin{lstlisting}[language=Python,breaklines]
+
+% import os
+% from tqdm import tqdm
+% import torch
+% import torch.nn as nn
+% import torch.optim as optim
+
+% from utils.loss import BPRLoss, TOP1Loss, HingeLoss
+
+
+% class AbstractRecommender(nn.Module):
+%     def __init__(self):
+%         super(AbstractRecommender, self).__init__()
+%         self.optimizer = None
+%         self.initializer = None
+%         self.loss_type = None
+%         self.lr = 0.01
+%         self.logger = None
+
+%         self.initializer_param_config = {
+%             'normal': {'mean':0.0, 'std':0.01},
+%             'uniform': {'a':0.0, 'b':1.0},
+%             'xavier_normal': {'gain':1.0},
+%             'xavier_uniform': {'gain':1.0}
+%         }
+
+%         self.initializer_config = {
+%             'normal': nn.init.normal_,
+%             'uniform': nn.init.uniform_,
+%             'xavier_normal': nn.init.xavier_normal_,
+%             'xavier_uniform': nn.init.xavier_uniform_
+%         }
+
+%     def calc_loss(self, batch):
+%         raise NotImplementedError
+
+%     def fit(self, train_loader):
+%         raise NotImplementedError
+
+%     def rank(self, test_loader):
+%         raise NotImplementedError
+
+%     def full_rank(self, u):
+%         raise NotImplementedError
+
+%     def predict(self, u, i):
+%         raise NotImplementedError
+
+%     def _build_optimizer(self, **kwargs):
+%         params = self.parameters()
+%         learner = kwargs.pop('optimizer', self.optimizer)
+%         learning_rate = kwargs.pop('lr', self.lr)
+
+%         if learner.lower() == 'adam':
+%             optimizer = optim.Adam(params, lr=learning_rate)
+%         elif learner.lower() == 'sgd':
+%             optimizer = optim.SGD(params, lr=learning_rate)
+%         elif learner.lower() == 'adagrad':
+%             optimizer = optim.Adagrad(params, lr=learning_rate)
+%         elif learner.lower() == 'rmsprop':
+%             optimizer = optim.RMSprop(params, lr=learning_rate)
+%         elif learner.lower() == 'sparse_adam':
+%             optimizer = optim.SparseAdam(params, lr=learning_rate)
+%         else:
+%             self.logger.info('Received unrecognized optimizer, set default Adam optimizer')
+%             optimizer = optim.Adam(params, lr=learning_rate)
+
+%         return optimizer
+
+%     def _init_weight(self, m):
+%         if isinstance(m, nn.Linear):
+%             self.initializer_config[self.initializer](m.weight, **self.initializer_param_config[self.initializer])
+%             if m.bias is not None:
+%                 nn.init.constant_(m.bias.data, 0.)
+%         elif isinstance(m, nn.Embedding):
+%             self.initializer_config[self.initializer](m.weight, **self.initializer_param_config[self.initializer])
+%         else:
+%             pass
+
+%     def _build_criterion(self, loss_type):
+%         if loss_type.upper() == 'CL':
+%             criterion = nn.BCEWithLogitsLoss(reduction='sum')
+%         elif loss_type.upper() == 'SL':
+%             criterion = nn.MSELoss(reduction='sum')
+%         elif loss_type.upper() == 'BPR':
+%             criterion = BPRLoss()
+%         elif loss_type.upper() == 'HL':
+%             criterion = HingeLoss()
+%         elif loss_type.upper() == 'TL':
+%             criterion = TOP1Loss()
+%         else:
+%             raise NotImplementedError(f'Invalid loss type: {self.loss_type}...')
+
+%         return criterion
+
+% class GeneralRecommender(AbstractRecommender):
+%     def __init__(self, config):
+%         super(GeneralRecommender, self).__init__()
+
+%         os.environ['CUDA_VISIBLE_DEVICES'] = config['gpu']
+%         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+%         self.logger = config['logger']
+
+%     def fit(self, train_loader):
+%         self.to(self.device)
+%         optimizer = self._build_optimizer(optimizer=self.optimizer, lr=self.lr)
+%         if self.loss_type is not None:
+%             self.criterion = self._build_criterion(self.loss_type)
+%         else:
+%             self.criterion = None
+
+%         last_loss = 0.
+%         for epoch in range(1, self.epochs + 1):
+%             self.train()
+
+%             current_loss = 0.
+%             pbar = tqdm(train_loader)
+%             pbar.set_description(f'[Epoch {epoch:03d}]')
+%             for batch in pbar:
+%                 self.zero_grad()
+%                 loss = self.calc_loss(batch)
+
+%                 if torch.isnan(loss):
+%                     raise ValueError(f'Loss=Nan or Infinity: current settings does not fit the recommender')
+
+%                 loss.backward()
+%                 optimizer.step()
+
+%                 current_loss += loss.item()
+%             pbar.set_postfix(loss=current_loss)
+
+%             self.eval()
+%             delta_loss = float(current_loss - last_loss)
+%             if (abs(delta_loss) < 1e-5) and self.early_stop:
+%                 self.logger.info('Satisfy early stop mechanism')
+%                 break
+%             else:
+%                 last_loss = current_loss
+
+% class AERecommender(GeneralRecommender):
+%     def __init__(self, config):
+%         super(AERecommender, self).__init__(config)
+%         self.user_num = None 
+%         self.item_num = None
+%         self.history_user_id, self.history_item_id = None, None
+%         self.history_user_value, self.history_item_value = None, None
+
+%     def get_user_rating_matrix(self, user):
+%         '''
+%         just convert the raw rating matrix to a much smaller matrix for calculation,
+%         the row index will be the new id for uid, but col index will still remain the old iid
+%         '''
+%         col_indices = self.history_item_id[user].flatten() # batch * max_inter_by_user -> (batch * max_inter_by_user)
+%         row_indices = torch.arange(user.shape[0]).to(self.device).repeat_interleave(
+%             self.history_item_id.shape[1], dim=0) # batch -> (batch * max_inter_by_user)
+%         rating_matrix = torch.zeros(1).to(self.device).repeat(user.shape[0], self.item_num) # batch * item_num
+%         rating_matrix.index_put_((row_indices, col_indices), self.history_item_value[user].flatten())
+        
+%         return rating_matrix
+
+%     def get_item_rating_matrix(self, item):
+%         col_indices = self.history_user_id[item].flatten()
+%         row_indices = torch.arange(item.shape[0]).to(self.device).repeat_interleave(
+%             self.history_user_id.shape[1], dim=0)
+%         rating_matrix = torch.zeros(1).to(self.device).repeat(item.shape[0], self.user_num)
+%         rating_matrix.index_put_((row_indices, col_indices), self.history_user_value[item].flatten())
+        
+%         return rating_matrix
+
+
+% import torch
+% import torch.nn as nn
+% import torch.nn.functional as F
+
+% import numpy as np
+% import scipy.sparse as sp
+
+% from model.AbstractRecommender import GeneralRecommender
+
+% class SparseDropout(nn.Module):
+%     '''
+%     This is a Module that execute Dropout on Pytorch sparse tensor.
+%     '''
+%     def __init__(self, p=0.5):
+%         super(SparseDropout, self).__init__()
+%         # p is ratio of dropout
+%         # convert to keep probability
+%         self.kprob = 1 - p
+
+%     def forward(self, x):
+%         if not self.training:
+%             return x
+
+%         mask = ((torch.rand(x._values().size()) + self.kprob).floor()).type(torch.bool)
+%         rc = x._indices()[:, mask]
+%         val = x._values()[mask] * (1.0 / self.kprob)
+%         return torch.sparse.FloatTensor(rc, val, x.shape)
+
+% class BiGNN(nn.Module):
+%     '''
+%     Propagate a layer of Bi-interaction GNN
+%         L = D^-1(A)D^-1 is laplace matrix, I is identity matrix
+%         output = (L+I)EW_1 + LE \otimes EW_2 = (LE + E)W_1 + LE \otimes EW_2
+%         so I can be never used.
+%     '''
+
+%     def __init__(self, in_dim, out_dim):
+%         super(BiGNN, self).__init__()
+%         self.in_dim = in_dim
+%         self.out_dim = out_dim
+%         self.linear = torch.nn.Linear(in_features=in_dim, out_features=out_dim)
+%         self.interact_transform = torch.nn.Linear(in_features=in_dim, out_features=out_dim)
+
+%     def forward(self, lap_matrix, features):
+%         x = torch.sparse.mm(lap_matrix, features)
+
+%         inter_part1 = self.linear(features + x)
+%         inter_feature = torch.mul(x, features)
+%         inter_part2 = self.interact_transform(inter_feature)
+
+%         return inter_part1 + inter_part2
+
+% class NGCF(GeneralRecommender):
+%     def __init__(self, config):
+%         """
+%         NGCF Recommender Class
+%         Parameters
+%         ----------
+%         user_num : int, the number of users
+%         item_num : int, the number of items
+%         factors : int, the number of latent factor
+%         node_dropout: float, node dropout ratio
+%         mess_dropout : float, messsage dropout rate
+%         hidden_size_list : list, dimension structure of hidden layers, optional.
+%         lr : float, learning rate
+%         reg_1 : float, first-order regularization term
+%         reg_2 : float, second-order regularization term
+%         epochs : int, number of training epochs
+%         loss_type : str, loss function type
+%         gpuid : str, GPU ID
+%         early_stop : bool, whether to activate early stop mechanism
+%         """
+%         super(NGCF, self).__init__(config)
+
+%         self.epochs = config['epochs']
+%         self.lr = config['lr']
+%         self.topk = config['topk']
+%         self.user_num = config['user_num']
+%         self.item_num = config['item_num']
+
+%         # get this matrix from utils.get_inter_matrix and add it in config
+%         self.interaction_matrix = config['inter_matrix']
+
+%         self.embedding_size = config['factors']
+%         self.hidden_size_list = config["hidden_size_list"] if config['hidden_size_list'] is not None else [64, 64, 64]
+%         self.hidden_size_list = [self.embedding_size] + self.hidden_size_list
+
+%         self.node_dropout = config['node_dropout']
+%         self.message_dropout = config['mess_dropout']
+%         self.reg_1 = config['reg_1']
+%         self.reg_2 = config['reg_2']
+
+%         self.sparse_dropout = SparseDropout(self.node_dropout)
+%         self.embed_user = nn.Embedding(self.user_num, self.embedding_size)
+%         self.embed_item = nn.Embedding(self.item_num, self.embedding_size)
+%         self.gnn_layers = torch.nn.ModuleList()
+%         for _, (in_size, out_size) in enumerate(zip(self.hidden_size_list[:-1], self.hidden_size_list[1:])):
+%             self.gnn_layers.append(BiGNN(in_size, out_size))
+        
+%         # storage variables for evaluation acceleration
+%         self.restore_user_e = None
+%         self.restore_item_e = None
+
+%         self.loss_type = config['loss_type']
+%         self.optimizer = config['optimizer'] if config['optimizer'] != 'default' else 'adam'
+%         self.initializer = config['init_method'] if config['init_method'] != 'default' else 'xavier_normal'
+%         self.early_stop = config['early_stop']
+
+%         # parameters initialization
+%         self.apply(self._init_weight)
+
+%         self.norm_adj_matrix = self.get_norm_adj_mat().to(self.device)
+%         # self.eye_matrix = self.get_eye_mat().to(self.device)
+
+%     def get_norm_adj_mat(self):
+%         A = sp.dok_matrix((self.user_num + self.item_num, self.user_num + self.item_num), dtype=np.float32)
+%         inter_M = self.interaction_matrix
+%         inter_M_t = self.interaction_matrix.transpose()
+%         data_dict = dict(zip(zip(inter_M.row, inter_M.col + self.user_num), [1] * inter_M.nnz))
+%         data_dict.update(dict(zip(zip(inter_M_t.row + self.user_num, inter_M_t.col), [1] * inter_M_t.nnz)))
+%         A._update(data_dict)
+%         # norm adj matrix
+%         sum_arr = (A > 0).sum(axis=1)
+%         diag = np.array(sum_arr.flatten())[0] + 1e-7  # add epsilon to avoid divide by zero Warning
+%         diag = np.power(diag, -0.5)
+%         D = sp.diags(diag)
+%         L = D * A * D
+%         # covert norm_adj matrix to tensor
+%         L = sp.coo_matrix(L)
+%         row = L.row
+%         col = L.col
+%         i = torch.LongTensor(np.array([row, col]))
+%         data = torch.FloatTensor(L.data)
+%         SparseL = torch.sparse.FloatTensor(i, data, torch.Size(L.shape))
+%         return SparseL
+
+%     def get_eye_mat(self):
+%         num = self.user_num + self.item_num  # number of column of the square matrix
+%         i = torch.LongTensor([range(0, num), range(0, num)])
+%         val = torch.FloatTensor([1] * num)  # identity matrix
+%         return torch.sparse.FloatTensor(i, val)
+
+%     def get_ego_embeddings(self):
+%         user_embeddings = self.embed_user.weight
+%         item_embeddings = self.embed_item.weight
+%         ego_embeddings = torch.cat([user_embeddings, item_embeddings], dim=0)
+%         return ego_embeddings
+
+%     def forward(self):
+%         A_hat = self.sparse_dropout(self.norm_adj_matrix) if self.node_dropout != 0 else self.norm_adj_matrix
+%         all_embeddings = self.get_ego_embeddings()
+%         embeddings_list = [all_embeddings]
+%         for gnn in self.gnn_layers:
+%             all_embeddings = gnn(A_hat, all_embeddings)
+%             all_embeddings = nn.LeakyReLU(negative_slope=0.2)(all_embeddings)
+%             all_embeddings = nn.Dropout(self.message_dropout)(all_embeddings)
+%             all_embeddings = F.normalize(all_embeddings, p=2, dim=1)
+%             embeddings_list += [all_embeddings]  # storage output embedding of each layer
+%         ngcf_all_embeddings = torch.cat(embeddings_list, dim=1)
+
+%         user_all_embeddings, item_all_embeddings = torch.split(ngcf_all_embeddings, [self.user_num, self.item_num])
+
+%         return user_all_embeddings, item_all_embeddings
+
+%     def calc_loss(self, batch):
+%         if self.restore_user_e is not None or self.restore_item_e is not None:
+%             self.restore_user_e, self.restore_item_e = None, None
+
+%         user = batch[0].to(self.device).long()
+%         pos_item = batch[1].to(self.device).long()
+
+%         embed_user, embed_item = self.forward()
+
+%         u_embeddings = embed_user[user]
+%         pos_embeddings = embed_item[pos_item]
+%         pos_pred = torch.mul(u_embeddings, pos_embeddings).sum(dim=1)
+
+%         u_ego_embeddings = self.embed_user(user)
+%         pos_ego_embeddings = self.embed_item(pos_item)
+
+%         if self.loss_type.upper() in ['CL', 'SL']:
+%             label = batch[2].to(self.device).float()
+%             loss = self.criterion(pos_pred, label)
+%             # add regularization term
+%             loss += self.reg_1 * (u_ego_embeddings.norm(p=1) + pos_ego_embeddings.norm(p=1))
+%             loss += self.reg_2 * (u_ego_embeddings.norm() + pos_ego_embeddings.norm())
+%         elif self.loss_type.upper() in ['BPR', 'TL', 'HL']:
+%             neg_item = batch[2].to(self.device).long()
+%             neg_embeddings = embed_item[neg_item]
+%             neg_pred = torch.mul(u_embeddings, neg_embeddings).sum(dim=1)
+%             neg_ego_embeddings = self.embed_item(neg_item)
+
+%             loss = self.criterion(pos_pred, neg_pred)
+
+%             loss += self.reg_1 * (u_ego_embeddings.norm(p=1) + pos_ego_embeddings.norm(p=1) + neg_ego_embeddings.norm(p=1))
+%             loss += self.reg_2 * (u_ego_embeddings.norm() + pos_ego_embeddings.norm() + neg_ego_embeddings.norm())
+
+%         else:
+%             raise NotImplementedError(f'Invalid loss type: {self.loss_type}')
+
+%         return loss
+
+%     def predict(self, u, i):
+%         if self.restore_user_e is None or self.restore_item_e is None:
+%             self.restore_user_e, self.restore_item_e = self.forward()
+
+%         u_embedding = self.restore_user_e[u]
+%         i_embedding = self.restore_item_e[i]
+%         pred = torch.matmul(u_embedding, i_embedding.t())
+
+%         return pred.cpu().item()
+
+%     def rank(self, test_loader):
+%         if self.restore_user_e is None or self.restore_item_e is None:
+%             self.restore_user_e, self.restore_item_e = self.forward()
+
+%         rec_ids = torch.tensor([], device=self.device)
+
+%         for us, cands_ids in test_loader:
+%             us = us.to(self.device)
+%             cands_ids = cands_ids.to(self.device)
+
+%             user_emb = self.restore_user_e[us].unsqueeze(dim=1) # batch * 1 * factor
+%             item_emb = self.restore_item_e[cands_ids].transpose(1, 2) # batch * factor * cand_num
+%             scores = torch.bmm(user_emb, item_emb).squeeze() # batch * cand_num
+
+%             rank_ids = torch.argsort(scores, descending=True)
+%             rank_list = torch.gather(cands_ids, 1, rank_ids)
+%             rank_list = rank_list[:, :self.topk]
+
+%             rec_ids = torch.cat((rec_ids, rank_list), 0)
+
+%         return rec_ids.cpu().numpy()
+
+%     def full_rank(self, u):
+%         if self.restore_user_e is None or self.restore_item_e is None:
+%             self.restore_user_e, self.restore_item_e = self.forward()
+
+%         user_emb = self.restore_user_e[u] # factor
+%         items_emb = self.restore_item_e.data # item * factor
+%         scores = torch.matmul(user_emb, items_emb.transpose(1, 0))
+
+%         return torch.argsort(scores, descending=True)[:self.topk].cpu().numpy()
+
+% import math
+% import torch
+% import torch.nn as nn
+% import torch.nn.functional as F
+% from model.AbstractRecommender import AERecommender
+
+
+% class VAECF(AERecommender):
+%     def __init__(self, config):
+%         """
+%         VAE Recommender Class
+%         Parameters
+%         ----------
+%         mlp_hidden_size : List, Q-net dimension list
+%         dropout : float, drop out rate
+%         epochs : int, number of training epochs
+%         lr : float, learning rate
+%         latent_dim: size of bottleneck layer
+%         anneal_cap : float, regularization for KLD
+%         optimizer : str, optimization method for training the algorithms
+%         initializer: str, parameter initializer
+%         early_stop : bool, whether to activate early stop mechanism
+%         """
+%         super(VAECF, self).__init__(config)
+%         self.epochs = config['epochs']
+%         self.lr = config['lr']
+%         self.dropout = config['dropout']
+
+%         self.layers = config["mlp_hidden_size"] if config['mlp_hidden_size'] is not None else [600]
+%         self.lat_dim = config['latent_dim']
+%         self.anneal_cap = config['anneal_cap']
+%         self.total_anneal_steps = config["total_anneal_steps"]
+
+%         self.user_num = config['user_num']
+%         self.item_num = config['item_num']
+
+%         self.history_item_id = config['history_item_id'].to(self.device)
+%         self.history_item_value = config['history_item_value'].to(self.device)
+%         self.update = 0
+
+%         self.encode_layer_dims = [self.item_num] + self.layers + [self.lat_dim]
+%         self.decode_layer_dims = [int(self.lat_dim / 2)] + self.encode_layer_dims[::-1][1:]
+
+%         self.encoder = self.mlp_layers(self.encode_layer_dims)
+%         self.decoder = self.mlp_layers(self.decode_layer_dims)
+        
+%         self.optimizer = config['optimizer'] if config['optimizer'] != 'default' else 'adam'
+%         self.initializer = config['init_method'] if config['init_method'] != 'default' else 'xavier_normal'
+%         self.early_stop = config['early_stop']
+
+%         self.apply(self._init_weight)
+%         self.topk = config['topk']
+
+%     def mlp_layers(self, layer_dims):
+%         mlp_modules = []
+%         for i, (in_dim, out_dim) in enumerate(zip(layer_dims[:-1], layer_dims[1:])):
+%             mlp_modules.append(nn.Linear(in_dim, out_dim))
+%             if i != len(layer_dims[:-1]) - 1:
+%                 mlp_modules.append(nn.Tanh())
+%         return nn.Sequential(*mlp_modules)
+
+%     def reparameterize(self, mu, logvar):
+%         if self.training:
+%             std = torch.exp(0.5 * logvar)
+%             eps = torch.randn_like(std)
+%             return eps.mul(std).add_(mu)  # core calculation for predicting the real distribution
+%         else:
+%             return mu
+
+%     def forward(self, rating_matrix):
+%         h = F.normalize(rating_matrix)
+%         h = F.dropout(h, self.dropout, training=self.training)
+%         h = self.encoder(h)
+
+%         mu = h[:, :int(self.lat_dim / 2)]
+%         logvar = h[:, math.ceil(self.lat_dim / 2):]
+
+%         z = self.reparameterize(mu, logvar)
+%         z = self.decoder(z)
+
+%         return z, mu, logvar
+
+%     def calc_loss(self, batch):
+%         user = batch.to(self.device).long()
+%         rating_matrix = self.get_user_rating_matrix(user)
+
+%         self.update += 1
+%         if self.total_anneal_steps > 0:
+%             anneal = min(self.anneal_cap, 1. * self.update / self.total_anneal_steps)
+%         else:
+%             anneal = self.anneal_cap
+
+%         z, mu, logvar = self.forward(rating_matrix)
+%         # KL loss
+%         kl_loss = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)) * anneal
+%         # CE loss
+%         ce_loss = -(F.log_softmax(z, 1) * rating_matrix).sum(1).mean()
+
+%         loss = ce_loss + kl_loss
+        
+%         return loss
+
+%     def predict(self, u, i):
+%         u = torch.tensor([u], device=self.device)
+%         i = torch.tensor([i], device=self.device)
+
+%         rating_matrix = self.get_user_rating_matrix(u)
+%         scores, _, _ = self.forward(rating_matrix)
+
+%         return scores[[torch.arange(len(i)).to(self.device), i]].cpu().item()
+
+%     def rank(self, test_loader):
+%         rec_ids = torch.tensor([], device=self.device)
+
+%         for us, cands_ids in test_loader:
+%             us = us.to(self.device)
+%             cands_ids = cands_ids.to(self.device)
+
+%             rating_matrix = self.get_user_rating_matrix(us)
+%             scores, _, _ = self.forward(rating_matrix) # dimension of scores: batch * item_num
+%             scores = scores[torch.arange(cands_ids.shape[0]).to(self.device).reshape(-1, 1).expand_as(cands_ids), cands_ids] # batch * item_num -> batch * cand_num
+
+%             rank_ids = torch.argsort(scores, descending=True)
+%             rank_list = torch.gather(cands_ids, 1, rank_ids)
+%             rank_list = rank_list[:, :self.topk]
+
+%             rec_ids = torch.cat((rec_ids, rank_list), 0)
+
+%         return rec_ids.cpu().numpy()
+
+%     def full_rank(self, u):
+%         u = torch.tensor([u], device=self.device)
+%         rating_matrix = self.get_user_rating_matrix(u)
+%         scores, _, _ = self.forward(rating_matrix)
+
+%         return torch.argsort(scores.view(-1), descending=True)[:self.topk].cpu().numpy()
+            
+
+
+% import torch
+% import torch.nn as nn
+
+% from model.AbstractRecommender import GeneralRecommender
+
+
+% class NeuMF(GeneralRecommender):
+%     def __init__(self, config):
+%         """
+%         NeuMF Recommender Class, it can be seperate as: GMF and MLP
+%         Parameters
+%         ----------
+%         user_num : int, number of users;
+%         item_num : int, number of items;
+%         factors : int, the number of latent factor
+%         num_layers : int, number of hidden layers
+%         dropout : float, dropout rate
+%         epochs : int, number of training epochs
+%         lr : float, learning rate
+%         reg_1 : float, first-order regularization term
+%         reg_2 : float, second-order regularization term
+%         loss_type : str, loss function type
+%         model_name : str, model name
+%         optimizer : str, optimization method for training the algorithms
+%         initializer: str, parameter initializer
+%         GMF_model : Object, pre-trained GMF weights;
+%         MLP_model : Object, pre-trained MLP weights.
+%         gpuid : str, GPU ID
+%         early_stop : bool, whether to activate early stop mechanism
+%         """
+%         super(NeuMF, self).__init__(config)
+
+%         self.lr = config['lr']
+%         self.epochs = config['epochs']
+%         self.reg_1 = config['reg_1']
+%         self.reg_2 = config['reg_2']
+
+%         self.dropout = config['dropout']
+%         self.model = config['model_name']
+%         self.GMF_model = config['GMF_model']
+%         self.MLP_model = config['MLP_model']
+
+%         self.embed_user_GMF = nn.Embedding(config['user_num'], config['factors'])
+%         self.embed_item_GMF = nn.Embedding(config['item_num'], config['factors'])
+
+%         self.embed_user_MLP = nn.Embedding(config['user_num'], config['factors'] * (2 ** (config['num_layers'] - 1)))
+%         self.embed_item_MLP = nn.Embedding(config['item_num'], config['factors'] * (2 ** (config['num_layers'] - 1)))
+
+%         MLP_modules = []
+%         for i in range(config['num_layers']):
+%             input_size = config['factors'] * (2 ** (config['num_layers'] - i))
+%             MLP_modules.append(nn.Dropout(p=self.dropout))
+%             MLP_modules.append(nn.Linear(input_size, input_size // 2))
+%             MLP_modules.append(nn.ReLU())
+%         self.MLP_layers = nn.Sequential(*MLP_modules)
+
+%         if self.model in ['MLP', 'GMF']:
+%             predict_size = config['factors']
+%         else:
+%             predict_size = config['factors'] * 2
+
+%         self.predict_layer = nn.Linear(predict_size, 1)
+
+%         self.loss_type = config['loss_type']
+%         self.optimizer = config['optimizer'] if config['optimizer'] != 'default' else 'adam'
+%         self.initializer = config['init_method'] if config['init_method'] != 'default' else 'xavier_normal'
+%         self.early_stop = config['early_stop']
+%         self.topk = config['topk']
+
+%         self._init_weight()
+
+%     def _init_weight(self):
+%         if not self.model == 'NeuMF-pre':
+%             self.initializer_config[self.initializer](self.embed_user_GMF.weight, **self.initializer_param_config[self.initializer])
+%             self.initializer_config[self.initializer](self.embed_item_GMF.weight, **self.initializer_param_config[self.initializer])
+%             self.initializer_config[self.initializer](self.embed_user_MLP.weight, **self.initializer_param_config[self.initializer])
+%             self.initializer_config[self.initializer](self.embed_item_MLP.weight, **self.initializer_param_config[self.initializer])
+
+%             for m in self.MLP_layers:
+%                 if isinstance(m, nn.Linear):
+%                     self.initializer_config[self.initializer](m.weight)
+%             self.initializer_config[self.initializer](
+%                 self.predict_layer.weight, 
+%                 **self.initializer_param_config[self.initializer])
+%             for m in self.modules():
+%                 if isinstance(m, nn.Linear) and m.bias is not None:
+%                     m.bias.data.zero_()
+%         else:
+%             # embedding layers
+%             self.embed_user_GMF.weight.data.copy_(self.GMF_model.embed_user_GMF.weight)
+%             self.embed_item_GMF.weight.data.copy_(self.GMF_model.embed_item_GMF.weight)
+%             self.embed_user_MLP.weight.data.copy_(self.MLP_model.embed_user_MLP.weight)
+%             self.embed_item_MLP.weight.data.copy_(self.MLP_model.embed_item_MLP.weight)
+        
+%             # mlp layers
+%             for (m1, m2) in zip(self.MLP_layers, self.MLP_model.MLP_layers):
+%                 if isinstance(m1, nn.Linear) and isinstance(m2, nn.Linear):
+%                     m1.weight.data.copy_(m2.weight)
+%                     m1.bias.data.copy_(m2.bias)
+            
+%             # predict layers
+%             predict_weight = torch.cat([self.GMF_model.predict_layer.weight, 
+%                                         self.MLP_model.predict_layer.weight], dim=1)
+%             predict_bias = self.GMF_model.predict_layer.bias + self.MLP_model.predict_layer.bias
+
+%             self.predict_layer.weight.data.copy_(0.5 * predict_weight)
+%             self.predict_layer.weight.data.copy_(0.5 * predict_bias)
+
+%     def forward(self, user, item):
+%         if not self.model == 'MLP':
+%             embed_user_GMF = self.embed_user_GMF(user)
+%             embed_item_GMF = self.embed_item_GMF(item)
+%             output_GMF = embed_user_GMF * embed_item_GMF
+%         if not self.model == 'GMF':
+%             embed_user_MLP = self.embed_user_MLP(user)
+%             embed_item_MLP = self.embed_item_MLP(item)
+%             interaction = torch.cat((embed_user_MLP, embed_item_MLP), dim=-1)
+%             output_MLP = self.MLP_layers(interaction)
+
+%         if self.model == 'GMF':
+%             concat = output_GMF
+%         elif self.model == 'MLP':
+%             concat = output_MLP
+%         else:
+%             concat = torch.cat((output_GMF, output_MLP), -1)
+
+%         prediction = self.predict_layer(concat)
+%         return prediction.view(-1)
+
+%     def calc_loss(self, batch):
+%         user = batch[0].to(self.device)
+%         pos_item = batch[1].to(self.device)
+%         pos_pred = self.forward(user, pos_item)
+
+%         if self.loss_type.upper() in ['CL', 'SL']:
+%             label = batch[2].to(self.device).float()
+%             loss = self.criterion(pos_pred, label)
+
+%             loss += self.reg_1 * (self.embed_item_GMF(pos_item).norm(p=1))
+%             loss += self.reg_1 * (self.embed_item_MLP(pos_item).norm(p=1))
+%             loss += self.reg_2 * (self.embed_item_GMF(pos_item).norm())
+%             loss += self.reg_2 * (self.embed_item_MLP(pos_item).norm())
+%         elif self.loss_type.upper() in ['BPR', 'TL', 'HL']:
+%             neg_item = batch[2].to(self.device)
+%             neg_pred = self.forward(user, neg_item)
+%             loss = self.criterion(pos_pred, neg_pred)
+
+%             loss += self.reg_1 * (self.embed_item_GMF(pos_item).norm(p=1) + self.embed_item_GMF(neg_item).norm(p=1))
+%             loss += self.reg_1 * (self.embed_item_MLP(pos_item).norm(p=1) + self.embed_item_GMF(neg_item).norm(p=1))
+%             loss += self.reg_2 * (self.embed_item_GMF(pos_item).norm() + self.embed_item_GMF(neg_item).norm())
+%             loss += self.reg_2 * (self.embed_item_MLP(pos_item).norm() + self.embed_item_GMF(neg_item).norm())
+%         else:
+%             raise NotImplementedError(f'Invalid loss type: {self.loss_type}')
+
+%         loss += self.reg_1 * (self.embed_user_GMF(user).norm(p=1))
+%         loss += self.reg_1 * (self.embed_user_MLP(user).norm(p=1))
+%         loss += self.reg_2 * (self.embed_user_GMF(user).norm())
+%         loss += self.reg_2 * (self.embed_user_MLP(user).norm())
+
+%         return loss
+
+%     def predict(self, u, i):
+%         u = torch.tensor(u, device=self.device)
+%         i = torch.tensor(i, device=self.device)
+%         pred = self.forward(u, i).cpu().item()
+
+%         return pred
+
+%     def rank(self, test_loader):
+%         rec_ids = torch.tensor([], device=self.device)
+
+%         for us, cands_ids in test_loader:
+%             us = us.to(self.device)
+%             cands_ids = cands_ids.to(self.device)
+
+%             if not self.model == 'MLP':
+%                 embed_user_GMF = self.embed_user_GMF(us).unsqueeze(dim=1) # batch * 1 * factor
+%                 embed_item_GMF = self.embed_item_GMF(cands_ids) # batch * cand_num * factor
+%                 output_GMF = embed_user_GMF * embed_item_GMF # batch * cand_num * factor
+%             if not self.model == 'GMF':
+%                 embed_user_MLP = self.embed_user_MLP(us).unsqueeze(dim=1) # batch * 1 * factor
+%                 embed_item_MLP = self.embed_item_MLP(cands_ids) # batch * cand_num * factor
+%                 interaction = torch.cat((embed_user_MLP.expand_as(embed_item_MLP), embed_item_MLP), dim=-1) # batch * cand_num * (2 * factor)
+%                 output_MLP = self.MLP_layers(interaction) # batch * cand_num * dim
+            
+%             if self.model == 'GMF':
+%                 concat = output_GMF
+%             elif self.model == 'MLP':
+%                 concat = output_MLP
+%             else:
+%                 concat = torch.cat((output_GMF, output_MLP), -1) # batch * cand_num * (dim + factor)
+%             scores = self.predict_layer(concat).squeeze() # batch * cand_num
+
+%             rank_ids = torch.argsort(scores, descending=True)
+%             rank_list = torch.gather(cands_ids, 1, rank_ids)
+%             rank_list = rank_list[:, :self.topk]
+
+%             rec_ids = torch.cat((rec_ids, rank_list), 0)
+
+%         return rec_ids.cpu().numpy()
+
+%     def full_rank(self, u):
+%         u = torch.tensor(u, device=self.device)
+
+%         if not self.model == 'MLP':
+%             embed_user_GMF = self.embed_user_GMF(u) # factor
+%             embed_item_GMF = self.embed_item_GMF.weight # item * factor
+%             output_GMF = embed_user_GMF * embed_item_GMF  # item * factor
+%         if not self.model == 'GMF':
+%             embed_user_MLP = self.embed_user_MLP(u) # factor
+%             embed_item_MLP = self.embed_item_MLP.weight # item * factor
+%             interaction = torch.cat((embed_user_MLP.expand_as(embed_item_MLP), embed_item_MLP), dim=-1) # item * (2*factor)
+%             output_MLP = self.MLP_layers(interaction) # item * dim
+
+%         if self.model == 'GMF':
+%             concat = output_GMF
+%         elif self.model == 'MLP':
+%             concat = output_MLP
+%         else:
+%             concat = torch.cat((output_GMF, output_MLP), -1) # item * (dim + factor)
+%         scores = self.predict_layer(concat).squeeze() # item
+        
+%         return torch.argsort(scores, descending=True)[:self.topk].cpu().numpy()
+
+% import os
+% import torch
+% import datetime
+% import numpy as np
+% import scipy.sparse as sp
+% from collections import defaultdict
+
+
+% def ensure_dir(path):
+%     if not os.path.exists(path):
+%         os.makedirs(path)
+
+% def get_local_time():
+%     cur = datetime.datetime.now()
+%     cur = cur.strftime('%b-%d-%Y_%H-%M-%S')
+
+%     return cur
+
+% def get_ur(df):
+%     """
+%     Method of getting user-rating pairs
+%     Parameters
+%     ----------
+%     df : pd.DataFrame, rating dataframe
+
+%     Returns
+%     -------
+%     ur : dict, dictionary stored user-items interactions
+%     """
+%     ur = defaultdict(set)
+%     for _, row in df.iterrows():
+%         ur[int(row['user'])].add(int(row['item']))
+
+%     return ur
+
+% def get_ir(df):
+%     """
+%     Method of getting item-rating pairs
+%     Parameters
+%     ----------
+%     df : pd.DataFrame, rating dataframe
+
+%     Returns
+%     -------
+%     ir : dict, dictionary stored item-users interactions
+%     """
+%     ir = defaultdict(set)
+%     for _, row in df.iterrows():
+%         ir[int(row['item'])].add(int(row['user']))
+
+%     return ir
+
+% def build_candidates_set(test_ur, train_ur, config, drop_past_inter=True):
+%     """
+%     method of building candidate items for ranking
+%     Parameters
+%     ----------
+%     test_ur : dict, ground_truth that represents the relationship of user and item in the test set
+%     train_ur : dict, this represents the relationship of user and item in the train set
+%     item_num : No. of all items
+%     cand_num : int, the number of candidates
+%     drop_past_inter : drop items already appeared in train set
+
+%     Returns
+%     -------
+%     test_ucands : dict, dictionary storing candidates for each user in test set
+%     """
+%     item_num = config['item_num']
+%     candidates_num = config['cand_num']
+
+%     test_ucands, test_u = [], []
+%     for u, r in test_ur.items():
+%         sample_num = candidates_num - len(r) if len(r) <= candidates_num else 0
+%         if sample_num == 0:
+%             samples = np.random.choice(list(r), candidates_num)
+%         else:
+%             pos_items = list(r) + list(train_ur[u]) if drop_past_inter else list(r)
+%             neg_items = np.setdiff1d(np.arange(item_num), pos_items)
+%             samples = np.random.choice(neg_items, size=sample_num)
+%             samples = np.concatenate((samples, list(r)), axis=None)
+
+%         test_ucands.append([u, samples])
+%         test_u.append(u)
+    
+%     return test_u, test_ucands
+
+% def get_history_matrix(df, config, row='user', use_config_value_name=False):
+%     '''
+%     get the history interactions by user/item
+%     '''
+%     logger = config['logger']
+%     assert row in df.columns, f'invalid name {row}: not in columns of history dataframe'
+%     uid_name, iid_name  = config['UID_NAME'], config['IID_NAME']
+%     user_ids, item_ids = df[uid_name].values, df[iid_name].values
+%     value_name = config['INTER_NAME'] if use_config_value_name else None
+
+%     user_num, item_num = config['user_num'], config['item_num']
+%     values = np.ones(len(df)) if value_name is None else df[value_name].values
+
+%     if row == 'user':
+%         row_num, max_col_num = user_num, item_num
+%         row_ids, col_ids = user_ids, item_ids
+%     else: # 'item'
+%         row_num, max_col_num = item_num, user_num
+%         row_ids, col_ids = item_ids, user_ids
+
+%     history_len = np.zeros(row_num, dtype=np.int64)
+%     for row_id in row_ids:
+%         history_len[row_id] += 1
+
+%     col_num = np.max(history_len)
+%     if col_num > max_col_num * 0.2:
+%         logger.info(f'Max value of {row}\'s history interaction records has reached: {col_num / max_col_num * 100:.4f}% of the total.')
+
+%     history_matrix = np.zeros((row_num, col_num), dtype=np.int64)
+%     history_value = np.zeros((row_num, col_num))
+%     history_len[:] = 0
+%     for row_id, value, col_id in zip(row_ids, values, col_ids):
+%         history_matrix[row_id, history_len[row_id]] = col_id
+%         history_value[row_id, history_len[row_id]] = value
+%         history_len[row_id] += 1
+
+%     return torch.LongTensor(history_matrix), torch.FloatTensor(history_value), torch.LongTensor(history_len)
+
+% def get_inter_matrix(df, config, form='coo'):
+%     '''
+%     get the whole sparse interaction matrix
+%     '''
+%     logger = config['logger']
+%     value_field = config['INTER_NAME']
+%     src_field, tar_field = config['UID_NAME'], config['IID_NAME']
+%     user_num, item_num = config['user_num'], config['item_num']
+
+%     src, tar = df[src_field].values, df[tar_field].values
+%     data = df[value_field].values
+
+%     mat = sp.coo_matrix((data, (src, tar)), shape=(user_num, item_num))
+
+%     if form == 'coo':
+%         return mat
+%     elif form == 'csr':
+%         return mat.tocsr()
+%     else:
+%         raise NotImplementedError(f'Sparse matrix format [{form}] has not been implemented...')
+
+%         import os
+%         import numpy as np
+%         import pandas as pd
+        
+%         metrics_name_config = {
+%             "recall": 'Recall',
+%             "mrr": 'MRR',
+%             "ndcg": 'NDCG',
+%             "hit": 'Hit Ratio',
+%             "precision": 'Precision',
+%             "f1": 'F1-score',
+%             "auc": 'AUC',
+%             "coverage": 'Coverage',
+%             "diversity": 'Diversity',
+%             "popularity": 'Average Popularity',
+%         }
+        
+%         def calc_ranking_results(test_ur, pred_ur, test_u, config):
+%             '''
+%             calculate metrics with prediction results and candidates sets
+        
+%             Parameters
+%             ----------
+%             test_ur : defaultdict(set)
+%                 groud truths for user in test set
+%             pred_ur : np.array
+%                 rank list for user in test set
+%             test_u : list
+%                 the user in order from test set
+%             '''    
+%             logger = config['logger']
+%             path = config['res_path']
+%             if not os.path.exists(path):
+%                 os.makedirs(path)
+        
+%             metric = Metric(config)
+%             res = pd.DataFrame({
+%                 'KPI@K': [metrics_name_config[kpi_name] for kpi_name in config['metrics']]
+%             })
+        
+%             common_ks = [1, 5, 10, 20, 30, 50]
+%             if config['topk'] not in common_ks:
+%                 common_ks.append(config['topk'])
+%             for topk in common_ks:
+%                 if topk > config['topk']:
+%                     continue
+%                 else:
+%                     rank_list = pred_ur[:, :topk]
+%                     kpis = metric.run(test_ur, rank_list, test_u)
+%                     if topk == 10:
+%                         for kpi_name, kpi_res in zip(config['metrics'], kpis):
+%                             kpi_name = metrics_name_config[kpi_name]
+%                             logger.info(f'{kpi_name}@{topk}: {kpi_res:.4f}')
+        
+%                     res[topk] = np.array(kpis)
+        
+%             return res
+        
+% class Metric(object):
+%     def __init__(self, config) -> None:
+%         self.metrics = config['metrics']
+%         self.item_num = config['item_num']
+%         self.item_pop = config['item_pop'] if 'coverage' in self.metrics else None
+%         self.i_categories = config['i_categories'] if 'diversity' in self.metrics else None
+
+%     def run(self, test_ur, pred_ur, test_u):
+%         res = []
+%         for mc in self.metrics:
+%             if mc == "coverage":
+%                 kpi = Coverage(pred_ur, self.item_num)
+%             elif mc == "popularity":
+%                 kpi = Popularity(test_ur, pred_ur, test_u, self.item_pop)
+%             elif mc == "diversity":
+%                 kpi = Diversity(pred_ur, self.i_categories)
+%             elif mc == 'ndcg':
+%                 kpi = NDCG(test_ur, pred_ur, test_u)
+%             elif mc == 'mrr':
+%                 kpi = MRR(test_ur, pred_ur, test_u)
+%             elif mc == 'recall':
+%                 kpi = Recall(test_ur, pred_ur, test_u)
+%             elif mc == 'precision':
+%                 kpi = Precision(test_ur, pred_ur, test_u)
+%             elif mc == 'hit':
+%                 kpi = HR(test_ur, pred_ur, test_u)
+%             elif mc == 'map':
+%                 kpi = MAP(test_ur, pred_ur, test_u)
+%             elif kpi == 'f1':
+%                 kpi = F1(test_ur, pred_ur, test_u)
+%             elif kpi == 'auc':
+%                 kpi = AUC(test_ur, pred_ur, test_u)
+%             else:
+%                 raise ValueError(f'Invalid metric name {mc}')
+
+%             res.append(kpi)
+    
+%         return res
+
+% def Coverage(pred_ur, item_num):
+%     '''
+%     Ge, Mouzhi, Carla Delgado-Battenfeld, and Dietmar Jannach. "Beyond accuracy: evaluating recommender systems by coverage and serendipity." Proceedings of the fourth ACM conference on Recommender systems. 2010.
+%     '''
+%     return len(np.unique(pred_ur)) / item_num
+
+% def Popularity(test_ur, pred_ur, test_u, item_pop):
+%     '''
+%     Abdollahpouri, Himan, et al. "The unfairness of popularity bias in recommendation." arXiv preprint arXiv:1907.13286 (2019).
+
+%     \frac{1}{|U|} \sum_{u \in U } \frac{\sum_{i \in R_{u}} \phi(i)}{|R_{u}|}
+%     '''
+%     res = []
+%     for idx in range(len(test_u)):
+%         u = test_u[idx]
+%         gt = test_ur[u]
+%         pred = pred_ur[idx]
+%         i = np.intersect1d(pred, list(gt))
+%         if len(i):
+%             avg_pop = np.sum(item_pop[i]) / len(gt)
+%             res.append(avg_pop)
+%         else:
+%             res.append(0)
+
+%     return np.mean(res)
+
+% def Diversity(pred_ur, i_categories):
+%     '''
+%     Intra-list similarity for diversity
+
+%     Parameters
+%     ----------
+%     pred_ur : np.array
+%         rank list for each user in test set
+%     i_categories : np.array
+%         (item_num, category_num) with 0/1 value
+%     ''' 
+%     res = []
+%     for u in range(len(pred_ur)):
+%         ILD = []
+%         for i in range(len(pred_ur[u])):
+%             item_i_cats = i_categories[pred_ur[u, i]]
+%             for j in range(i + 1, len(pred_ur[u])):
+%                 item_j_cats = i_categories[pred_ur[u, j]]
+%                 distance = np.linalg.norm(item_i_cats - item_j_cats)
+%                 ILD.append(distance)
+%         res.append(np.mean(ILD))
+
+%     return np.mean(res)
+
+% def Precision(test_ur, pred_ur, test_u):
+%     res = []
+%     for idx in range(len(test_u)):
+%         u = test_u[idx]
+%         gt = test_ur[u]
+%         pred = pred_ur[idx]
+%         pre = np.in1d(pred, list(gt)).sum() / len(pred)
+
+%         res.append(pre)
+
+%     return np.mean(res)
+
+% def Recall(test_ur, pred_ur, test_u):
+%     res = []
+%     for idx in range(len(test_u)):
+%         u = test_u[idx]
+%         gt = test_ur[u]
+%         pred = pred_ur[idx]
+%         rec = np.in1d(pred, list(gt)).sum() / len(gt)
+
+%         res.append(rec)
+
+%     return np.mean(res)
+
+% def MRR(test_ur, pred_ur, test_u):
+%     res = []
+%     for idx in range(len(test_u)):
+%         u = test_u[idx]
+%         gt = test_ur[u]
+%         pred = pred_ur[idx]
+%         mrr = 0.
+%         for index, item in enumerate(pred):
+%             if item in gt:
+%                 mrr = 1 / (index + 1)
+%                 break
+        
+%         res.append(mrr)
+
+%     return np.mean(res)
+
+% def MAP(test_ur, pred_ur, test_u):
+%     res = []
+%     for idx in range(len(test_u)):
+%         u = test_u[idx]
+%         gt = test_ur[u]
+%         pred = pred_ur[idx]
+%         r = np.in1d(pred, list(gt))
+%         out = [r[:k+1].sum() / (k + 1) for k in range(r.size) if r[k]]
+%         if not out:
+%             res.append(0.)
+%         else:
+%             ap = np.mean(out)
+%             res.append(ap)
+
+%     return np.mean(res)
+
+% def NDCG(test_ur, pred_ur, test_u):
+%     def DCG(r):
+%         r = np.asfarray(r) != 0
+%         if r.size:
+%             dcg = np.sum(np.subtract(np.power(2, r), 1) / np.log2(np.arange(2, r.size + 2)))
+%             return dcg
+%         return 0.
+
+%     res = []
+%     for idx in range(len(test_u)):
+%         u = test_u[idx]
+%         gt = test_ur[u]
+%         pred = pred_ur[idx]
+%         r = np.in1d(pred, list(gt))
+
+%         idcg = DCG(sorted(r, reverse=True))
+%         if not idcg:
+%             ndcg = 0.
+%         else:
+%             ndcg = DCG(r) / idcg
+
+%         res.append(ndcg)
+
+%     return np.mean(res)
+
+% def HR(test_ur, pred_ur, test_u):
+%     res = []
+%     for idx in range(len(test_u)):
+%         u = test_u[idx]
+%         gt = test_ur[u]
+%         pred = pred_ur[idx]
+
+%         r = np.in1d(pred, list(gt))
+%         res.append(1 if r.sum() else 0)
+
+%     return np.mean(res)
+
+% def AUC(test_ur, pred_ur, test_u):
+%     res = []
+
+%     for idx in range(len(test_u)):
+%         u = test_u[idx]
+%         gt = test_ur[u]
+%         pred = pred_ur[idx]
+
+%         r = np.in1d(pred, list(gt))
+%         pos_num = r.sum()
+%         neg_num = len(pred) - pos_num
+
+%         pos_rank_num = 0
+%         for j in range(len(r) - 1):
+%             if r[j]:
+%                 pos_rank_num += np.sum(~r[j + 1:])
+
+%         auc = pos_rank_num / (pos_num * neg_num)
+%         res.append(auc)
+                
+%     return np.mean(res)
+
+% def F1(test_ur, pred_ur, test_u):
+%     res = []
+
+%     for idx in range(len(test_u)):
+%         u = test_u[idx]
+%         gt = test_ur[u]
+%         pred = pred_ur[idx]
+
+%         r = np.in1d(pred, list(gt))
+%         pre = r.sum() / len(pred)
+%         rec = r.sum() / len(gt)
+
+%         f1 = 2 * pre * rec / (pre + rec)
+%         res.append(f1)
+
+%     return np.mean(res)
+                    
+% \end{lstlisting}
